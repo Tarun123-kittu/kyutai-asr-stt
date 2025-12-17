@@ -105,6 +105,32 @@ class StreamingKyutaiEngine:
             except Exception as e:
                 logger.error(f"Error transcribing audio: {e}")
                 return "", 0.0
+            
+class RealtimeStreamingSession:
+    def __init__(self, engine: StreamingKyutaiEngine):
+        self.engine = engine
+        self.audio_buffer = []
+        self.closed = False
+
+        self.lm_gen = LMGen(
+            self.engine.lm_model,
+            temp=0,
+            temp_text=0,
+            use_sampling=False
+        )
+
+        self.first_frame = True
+
+    def append_pcm16(self, pcm_bytes: bytes):
+        audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        self.audio_buffer.append(audio)
+
+    def consume_audio(self):
+        if not self.audio_buffer:
+            return None
+        audio = np.concatenate(self.audio_buffer)
+        self.audio_buffer.clear()
+        return audio
 
 # Global engine instance
 stt_engine: Optional[StreamingKyutaiEngine] = None
@@ -247,15 +273,114 @@ async def create_translation(
 # --- Keep existing endpoints for backward compatibility ---
 
 @app.websocket("/v1/realtime")
-async def openai_realtime_websocket(websocket: WebSocket, model: str = Query(default="kyutai/stt-1b-en_fr")):
-    """OpenAI Realtime API Compatible WebSocket endpoint (existing)"""
-    # ... existing realtime code ...
-    await websocket.accept()
-    await websocket.send_text(json.dumps({
+async def openai_realtime_websocket(
+    websocket: WebSocket,
+    model: str = Query(default="kyutai/stt-1b-en_fr")
+):
+    await websocket.accept()    
+
+    session_id = f"sess_{int(time.time())}"
+    logger.info(f"🟢 [WS:{session_id}] Connected")
+
+    if not stt_engine:
+        logger.error("❌ STT engine not ready")
+        await websocket.close()
+        return
+
+    session = RealtimeStreamingSession(stt_engine)
+
+    await websocket.send_json({
         "type": "session.created",
-        "session": {"id": "sess_" + str(int(time.time())), "model": model}
-    }))
-    # Simplified for space - use your existing realtime implementation
+        "session": {
+            "id": session_id,
+            "model": model,
+            "sample_rate": stt_engine.sample_rate
+        }
+    })
+    await websocket.send_json({
+                                "type": "response.output_text.delta",
+                                "delta": "version 1 "
+                            })
+    async def decoder_loop():
+        logger.info(f"🎧 [WS:{session_id}] Decoder loop started")
+        try:
+            async with stt_engine.lock:
+                with stt_engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
+                    while not session.closed:
+                        await asyncio.sleep(0.2)  # ⭐ latency control
+
+                        audio = session.consume_audio()
+                        if audio is None or len(audio) < stt_engine.frame_size * 3:
+                            continue
+
+                        # IMPORTANT: process STRICT Mimi frames only
+                        num_frames = len(audio) // stt_engine.frame_size
+
+                        for f in range(num_frames):
+                            start = f * stt_engine.frame_size
+                            end = start + stt_engine.frame_size
+                            chunk = audio[start:end]
+
+                            pcm = torch.from_numpy(chunk).to(stt_engine.device)
+                            pcm = pcm.unsqueeze(0).unsqueeze(0)
+
+                            codes = stt_engine.mimi.encode(pcm)
+
+                            if session.first_frame:
+                                session.lm_gen.step(codes)
+                                session.first_frame = False
+                                continue
+
+                            tokens = session.lm_gen.step(codes)
+                            if tokens is None:
+                                continue
+
+                            text_id = tokens[0, 0].cpu().item()
+                            if text_id in (0, 3):
+                                continue
+
+                            piece = stt_engine.text_tokenizer.id_to_piece(text_id)
+                            text = piece.replace("▁", " ")
+
+                            logger.info(f"📝 [WS:{session_id}] Δ {text}")
+
+                            await websocket.send_json({
+                                "type": "response.output_text.delta",
+                                "delta": text
+                            })
+
+        except asyncio.CancelledError:
+            logger.warning(f"⛔ [WS:{session_id}] Decoder cancelled")
+        except Exception as e:
+            logger.exception(f"❌ [WS:{session_id}] Decoder error: {e}")
+
+    decoder_task = asyncio.create_task(decoder_loop())
+
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            data = json.loads(msg)
+
+            logger.debug(f"📩 [WS:{session_id}] RX {data.get('type')}")
+
+            if data["type"] == "input_audio_buffer.append":
+                pcm = base64.b64decode(data["audio"])
+                session.append_pcm16(pcm)
+
+            elif data["type"] == "input_audio_buffer.commit":
+                if not session.audio_buffer:
+                    logger.debug(f"⚠️ Commit ignored (no audio)")
+                    continue
+                logger.debug(f"✅ Commit accepted")
+
+    except WebSocketDisconnect:
+        logger.warning(f"🔌 [WS:{session_id}] Disconnected")
+    except Exception as e:
+        logger.exception(f"❌ [WS:{session_id}] WS error: {e}")
+    finally:
+        session.closed = True
+        decoder_task.cancel()
+        logger.info(f"🛑 [WS:{session_id}] Session closed")
 
 @app.websocket("/v1/audio/stream")
 async def legacy_websocket_endpoint(websocket: WebSocket):
