@@ -304,13 +304,13 @@ async def openai_realtime_websocket(
     async def decoder_loop():
         logger.info(f"🎧 [WS:{session_id}] Decoder loop started")
         try:
-            async with stt_engine.lock:
+            # async with stt_engine.lock:
                 with stt_engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
                     while not session.closed:
-                        await asyncio.sleep(0.2)  # ⭐ latency control
+                        await asyncio.sleep(0.04)  # ⭐ latency control
 
                         audio = session.consume_audio()
-                        if audio is None or len(audio) < stt_engine.frame_size * 3:
+                        if audio is None or len(audio) < stt_engine.frame_size:
                             continue
 
                         # IMPORTANT: process STRICT Mimi frames only
