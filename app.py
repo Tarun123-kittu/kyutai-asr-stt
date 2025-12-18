@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 import librosa
 from pydantic import BaseModel
+from asyncio import Queue
 
 # --- Moshi Streaming Imports ---
 from moshi.models import loaders, MimiModel, LMModel, LMGen
@@ -111,6 +112,8 @@ class RealtimeStreamingSession:
         self.engine = engine
         self.audio_buffer = []
         self.closed = False
+
+        self.text_queue = Queue()
 
         self.lm_gen = LMGen(
             self.engine.lm_model,
@@ -344,10 +347,7 @@ async def openai_realtime_websocket(
 
                             logger.info(f"📝 [WS:{session_id}] Δ {text}")
 
-                            await websocket.send_json({
-                                "type": "response.output_text.delta",
-                                "delta": text
-                            })
+                            await session.text_queue.put(text)
 
         except asyncio.CancelledError:
             logger.warning(f"⛔ [WS:{session_id}] Decoder cancelled")
@@ -355,6 +355,21 @@ async def openai_realtime_websocket(
             logger.exception(f"❌ [WS:{session_id}] Decoder error: {e}")
 
     decoder_task = asyncio.create_task(decoder_loop())
+
+    async def sender_loop():
+        try:
+            while not session.closed:
+                text = await session.text_queue.get()
+                await websocket.send_json({
+                    "type": "response.output_text.delta",
+                    "delta": text
+                })
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.warning(f"Sender error: {e}")
+    sender_task = asyncio.create_task(sender_loop())
+    
 
     try:
         while True:
@@ -380,6 +395,7 @@ async def openai_realtime_websocket(
     finally:
         session.closed = True
         decoder_task.cancel()
+        sender_task.cancel()
         logger.info(f"🛑 [WS:{session_id}] Session closed")
 
 @app.websocket("/v1/audio/stream")
