@@ -131,9 +131,19 @@ class RealtimeStreamingSession:
     def consume_audio(self):
         if not self.audio_buffer:
             return None
+
         audio = np.concatenate(self.audio_buffer)
-        self.audio_buffer.clear()
-        return audio
+
+        # DO NOT clear everything
+        if len(audio) < self.engine.frame_size:
+            return None
+
+        # keep remainder
+        usable = audio[: (len(audio) // self.engine.frame_size) * self.engine.frame_size]
+        remainder = audio[len(usable):]
+
+        self.audio_buffer = [remainder] if len(remainder) else []
+        return usable
 
 # Global engine instance
 stt_engine: Optional[StreamingKyutaiEngine] = None
@@ -290,6 +300,10 @@ async def openai_realtime_websocket(
         await websocket.close()
         return
 
+    # session = RealtimeStreamingSession(
+    #                 StreamingKyutaiEngine(device=stt_engine.device)
+    #             )
+
     session = RealtimeStreamingSession(stt_engine)
 
     await websocket.send_json({
@@ -383,9 +397,9 @@ async def openai_realtime_websocket(
                 session.append_pcm16(pcm)
 
             elif data["type"] == "input_audio_buffer.commit":
-                if not session.audio_buffer:
-                    logger.debug(f"⚠️ Commit ignored (no audio)")
-                    continue
+                # if not session.audio_buffer:
+                #     logger.debug(f"⚠️ Commit ignored (no audio)")
+                #     continue
                 logger.debug(f"✅ Commit accepted")
 
     except WebSocketDisconnect:
