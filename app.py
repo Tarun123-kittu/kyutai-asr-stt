@@ -314,10 +314,7 @@ async def openai_realtime_websocket(
             "sample_rate": stt_engine.sample_rate
         }
     })
-    await websocket.send_json({
-                                "type": "response.output_text.delta",
-                                "delta": "version 1 "
-                            })
+   
     async def decoder_loop():
         logger.info(f"🎧 [WS:{session_id}] Decoder loop started")
         try:
