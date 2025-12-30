@@ -57,7 +57,7 @@ class StreamingKyutaiEngine:
         self._model_loaded = True
         
         # --- Lock to protect the stateful model ---
-        self.lock = asyncio.Lock()
+        # self.lock = asyncio.Lock()
         
         logger.info(f"🎉 Moshi streaming engine components loaded on {self.device}")
 
@@ -300,11 +300,11 @@ async def openai_realtime_websocket(
         await websocket.close()
         return
 
-    # session = RealtimeStreamingSession(
-    #                 StreamingKyutaiEngine(device=stt_engine.device)
-    #             )
+    # NEW — create per-session model
+    session_engine = StreamingKyutaiEngine(device=stt_engine.device)
+    session = RealtimeStreamingSession(session_engine)
 
-    session = RealtimeStreamingSession(stt_engine)
+    # session = RealtimeStreamingSession(stt_engine)
 
     await websocket.send_json({
         "type": "session.created",
@@ -319,7 +319,8 @@ async def openai_realtime_websocket(
         logger.info(f"🎧 [WS:{session_id}] Decoder loop started")
         try:
             # async with stt_engine.lock:
-                with stt_engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
+                # with stt_engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
+                with session.engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
                     while not session.closed:
                         await asyncio.sleep(0.04)  # ⭐ latency control
 
