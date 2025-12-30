@@ -134,13 +134,14 @@ class RealtimeStreamingSession:
 
         audio = np.concatenate(self.audio_buffer)
 
-        # DO NOT clear everything
-        if len(audio) < self.engine.frame_size:
+        min_frames = 3  # 🔥 critical
+        min_samples = self.engine.frame_size * min_frames
+
+        if len(audio) < min_samples:
             return None
 
-        # keep remainder
-        usable = audio[: (len(audio) // self.engine.frame_size) * self.engine.frame_size]
-        remainder = audio[len(usable):]
+        usable = audio[:min_samples]
+        remainder = audio[min_samples:]
 
         self.audio_buffer = [remainder] if len(remainder) else []
         return usable
@@ -322,7 +323,7 @@ async def openai_realtime_websocket(
                 # with stt_engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
                 with session.engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
                     while not session.closed:
-                        await asyncio.sleep(0.04)  # ⭐ latency control
+                        await asyncio.sleep(0.1)  # ⭐ latency control
 
                         audio = session.consume_audio()
                         if audio is None or len(audio) < stt_engine.frame_size:
