@@ -134,7 +134,7 @@ class RealtimeStreamingSession:
 
         audio = np.concatenate(self.audio_buffer)
 
-        min_frames = 15  # 🔥 critical
+        min_frames = 10  # 🔥 critical
         min_samples = self.engine.frame_size * min_frames
 
         if len(audio) < min_samples:
