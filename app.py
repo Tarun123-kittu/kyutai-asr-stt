@@ -112,7 +112,7 @@ class RealtimeStreamingSession:
         self.engine = engine
         self.audio_buffer = []
         self.closed = False
-
+        self.force_decode = False
         self.text_queue = Queue()
 
         self.lm_gen = LMGen(
@@ -317,55 +317,50 @@ async def openai_realtime_websocket(
     })
    
     async def decoder_loop():
-        logger.info(f"🎧 [WS:{session_id}] Decoder loop started")
-        try:
-            # async with stt_engine.lock:
-                # with stt_engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
-                with session.engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
-                    while not session.closed:
-                        await asyncio.sleep(0.1)  # ⭐ latency control
+        with session.engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
+            while not session.closed:
+                await asyncio.sleep(0.08)
 
-                        audio = session.consume_audio()
-                        if audio is None or len(audio) < stt_engine.frame_size:
-                            continue
+                audio = session.consume_audio()
 
-                        # IMPORTANT: process STRICT Mimi frames only
-                        num_frames = len(audio) // stt_engine.frame_size
+                # 🚨 THIS IS THE CORE FIX
+                if audio is None and not session.force_decode:
+                    continue
 
-                        for f in range(num_frames):
-                            start = f * stt_engine.frame_size
-                            end = start + stt_engine.frame_size
-                            chunk = audio[start:end]
+                if audio is None and session.force_decode:
+                    # pad silence to force decoding
+                    audio = np.zeros(session.engine.frame_size * 2, dtype=np.float32)
 
-                            pcm = torch.from_numpy(chunk).to(stt_engine.device)
-                            pcm = pcm.unsqueeze(0).unsqueeze(0)
+                session.force_decode = False
 
-                            codes = stt_engine.mimi.encode(pcm)
+                for i in range(0, len(audio), session.engine.frame_size):
+                    chunk = audio[i:i + session.engine.frame_size]
 
-                            if session.first_frame:
-                                session.lm_gen.step(codes)
-                                session.first_frame = False
-                                continue
+                    if len(chunk) < session.engine.frame_size:
+                        chunk = np.pad(chunk, (0, session.engine.frame_size - len(chunk)))
 
-                            tokens = session.lm_gen.step(codes)
-                            if tokens is None:
-                                continue
+                    pcm = torch.from_numpy(chunk).to(session.engine.device)
+                    pcm = pcm.unsqueeze(0).unsqueeze(0)
 
-                            text_id = tokens[0, 0].cpu().item()
-                            if text_id in (0, 3):
-                                continue
+                    codes = session.engine.mimi.encode(pcm)
 
-                            piece = stt_engine.text_tokenizer.id_to_piece(text_id)
-                            text = piece.replace("▁", " ")
+                    if session.first_frame:
+                        session.lm_gen.step(codes)
+                        session.first_frame = False
+                        continue
 
-                            logger.info(f"📝 [WS:{session_id}] Δ {text}")
+                    tokens = session.lm_gen.step(codes)
+                    if tokens is None:
+                        continue
 
-                            await session.text_queue.put(text)
+                    token_id = tokens[0, 0].item()
+                    if token_id in (0, 3):
+                        continue
 
-        except asyncio.CancelledError:
-            logger.warning(f"⛔ [WS:{session_id}] Decoder cancelled")
-        except Exception as e:
-            logger.exception(f"❌ [WS:{session_id}] Decoder error: {e}")
+                    text = session.engine.text_tokenizer.id_to_piece(token_id)
+                    text = text.replace("▁", " ")
+
+                    await session.text_queue.put(text)
 
     decoder_task = asyncio.create_task(decoder_loop())
 
@@ -400,6 +395,7 @@ async def openai_realtime_websocket(
                 #     logger.debug(f"⚠️ Commit ignored (no audio)")
                 #     continue
                 logger.debug(f"✅ Commit accepted")
+                session.force_decode = True
 
     except WebSocketDisconnect:
         logger.warning(f"🔌 [WS:{session_id}] Disconnected")
