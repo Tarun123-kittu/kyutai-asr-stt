@@ -134,7 +134,7 @@ class RealtimeStreamingSession:
 
         audio = np.concatenate(self.audio_buffer)
 
-        min_frames = 3  # 🔥 critical
+        min_frames = 15  # 🔥 critical
         min_samples = self.engine.frame_size * min_frames
 
         if len(audio) < min_samples:
@@ -324,14 +324,14 @@ async def openai_realtime_websocket(
                 audio = session.consume_audio()
 
                 # 🚨 THIS IS THE CORE FIX
-                if audio is None and not session.force_decode:
+                if audio is None:
                     continue
 
-                if audio is None and session.force_decode:
-                    # pad silence to force decoding
-                    audio = np.zeros(session.engine.frame_size * 2, dtype=np.float32)
+                # if audio is None and session.force_decode:
+                #     # pad silence to force decoding
+                #     audio = np.zeros(session.engine.frame_size * 2, dtype=np.float32)
 
-                session.force_decode = False
+                # session.force_decode = False
 
                 for i in range(0, len(audio), session.engine.frame_size):
                     chunk = audio[i:i + session.engine.frame_size]
