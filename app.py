@@ -323,12 +323,8 @@ async def openai_realtime_websocket(
 
                 audio = session.consume_audio()
 
-                if audio is None:
-                    continue
-
-                # Hard reject low-energy segments
-                energy = np.mean(np.abs(audio))
-                if energy < 0.01:
+                # 🚨 THIS IS THE CORE FIX
+                if audio is None or np.max(np.abs(audio)) < 0.005:
                     continue
 
                 # if audio is None and session.force_decode:
