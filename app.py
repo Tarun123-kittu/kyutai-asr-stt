@@ -15,8 +15,6 @@ from asyncio import Queue
 from moshi.models import loaders, MimiModel, LMModel, LMGen
 import sentencepiece
 
-model_lock = asyncio.Lock()
-
 # --- OpenAI Whisper API Compatible Response Models ---
 class TranscriptionWord(BaseModel):
     word: str
@@ -125,14 +123,6 @@ class RealtimeStreamingSession:
         )
 
         self.first_frame = True
-    def reset_decoder(self):
-        self.lm_gen = LMGen(
-            self.engine.lm_model,
-            temp=0,
-            temp_text=0,
-            use_sampling=False
-        )
-        self.first_frame = True    
 
     def append_pcm16(self, pcm_bytes: bytes):
         audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -327,45 +317,50 @@ async def openai_realtime_websocket(
     })
    
     async def decoder_loop():
-        async with model_lock:
-            with session.engine.mimi.streaming(batch_size=1):
-                while not session.closed:
-                    await asyncio.sleep(0.03)
+        with session.engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
+            while not session.closed:
+                await asyncio.sleep(0.08)
 
-                    audio = session.consume_audio()
+                audio = session.consume_audio()
 
-                    # ---------- SILENCE DETECTION ----------
-                    if audio is None or np.max(np.abs(audio)) < 0.008:
-                        # silence detected → reset LM state
-                        session.reset_decoder()
+                # 🚨 THIS IS THE CORE FIX
+                if audio is None or np.max(np.abs(audio)) < 0.005:
+                    continue
+
+                # if audio is None and session.force_decode:
+                #     # pad silence to force decoding
+                #     audio = np.zeros(session.engine.frame_size * 2, dtype=np.float32)
+
+                # session.force_decode = False
+
+                for i in range(0, len(audio), session.engine.frame_size):
+                    chunk = audio[i:i + session.engine.frame_size]
+
+                    if len(chunk) < session.engine.frame_size:
+                        chunk = np.pad(chunk, (0, session.engine.frame_size - len(chunk)))
+
+                    pcm = torch.from_numpy(chunk).to(session.engine.device)
+                    pcm = pcm.unsqueeze(0).unsqueeze(0)
+
+                    codes = session.engine.mimi.encode(pcm)
+
+                    if session.first_frame:
+                        session.lm_gen.step(codes)
+                        session.first_frame = False
                         continue
 
-                    for i in range(0, len(audio), session.engine.frame_size):
-                        chunk = audio[i:i + session.engine.frame_size]
+                    tokens = session.lm_gen.step(codes)
+                    if tokens is None:
+                        continue
 
-                        if len(chunk) < session.engine.frame_size:
-                            continue
+                    token_id = tokens[0, 0].item()
+                    if token_id in (0, 3):
+                        continue
 
-                        pcm = torch.from_numpy(chunk).to(session.engine.device)
-                        pcm = pcm.unsqueeze(0).unsqueeze(0)
+                    text = session.engine.text_tokenizer.id_to_piece(token_id)
+                    text = text.replace("▁", " ")
 
-                        codes = session.engine.mimi.encode(pcm)
-
-                        if session.first_frame:
-                            session.lm_gen.step(codes)
-                            session.first_frame = False
-                            continue
-
-                        tokens = session.lm_gen.step(codes)
-                        if tokens is None:
-                            continue
-
-                        token_id = tokens[0, 0].item()
-                        if token_id in (0, 3):
-                            continue
-
-                        text = session.engine.text_tokenizer.id_to_piece(token_id)
-                        await session.text_queue.put(text)
+                    await session.text_queue.put(text)
 
     decoder_task = asyncio.create_task(decoder_loop())
 
