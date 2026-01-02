@@ -125,6 +125,14 @@ class RealtimeStreamingSession:
         )
 
         self.first_frame = True
+    def reset_decoder(self):
+        self.lm_gen = LMGen(
+            self.engine.lm_model,
+            temp=0,
+            temp_text=0,
+            use_sampling=False
+        )
+        self.first_frame = True    
 
     def append_pcm16(self, pcm_bytes: bytes):
         audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -320,14 +328,16 @@ async def openai_realtime_websocket(
    
     async def decoder_loop():
         async with model_lock:
-            with session.engine.mimi.streaming(batch_size=1), session.lm_gen.streaming(batch_size=1):
+            with session.engine.mimi.streaming(batch_size=1):
                 while not session.closed:
                     await asyncio.sleep(0.03)
 
                     audio = session.consume_audio()
 
-                    # Silence gate (VERY IMPORTANT)
+                    # ---------- SILENCE DETECTION ----------
                     if audio is None or np.max(np.abs(audio)) < 0.008:
+                        # silence detected → reset LM state
+                        session.reset_decoder()
                         continue
 
                     for i in range(0, len(audio), session.engine.frame_size):
